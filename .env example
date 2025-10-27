@@ -1,0 +1,6 @@
+ZAMMAD_URL=http://localhost:8080
+ZAMMAD_TOKEN=
+CSV_PATH=./tickets_data.csv
+LOG_LEVEL=INFO
+LOG_FILE=zammad_app.log
+DEBUG=True
