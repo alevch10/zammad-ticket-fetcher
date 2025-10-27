@@ -56,9 +56,7 @@ class TicketRecord(BaseModel):
 
 
 class TicketSearchResponse(BaseModel):
-    records: Optional[List[TicketRecord]] = None
-    total_count: Optional[int] = None
-    # Comment: This allows flexible parsing; if API changes, add fields here
+    root: List[TicketRecord]
 
 
 # Schema for Ticket Articles Response (list of articles)

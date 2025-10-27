@@ -4,7 +4,7 @@ faiss_index
 data
 zammad_app.log
 .venv 
-
+tickets_data.csv
 ### macOS ###
 # General
 .DS_Store
