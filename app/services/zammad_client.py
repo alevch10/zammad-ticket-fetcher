@@ -13,6 +13,7 @@ class ZammadClient:
     Client for prod Zammad format: {'tickets': [IDs], 'tickets_count': total, 'assets': {'Ticket': {ID: full_ticket}}}
     Simplified: Always use exact 'created_at:{date_str}' query (no range for simplicity).
     Pagination based on tickets_count and partial pages.
+    Fixed: Generic _make_request logging (handle list/dict); articles expect list.
     """
 
     def __init__(self):
@@ -37,7 +38,11 @@ class ZammadClient:
     )
     def _make_request(
         self, method: str, endpoint: str, params: Dict[str, Any] = None
-    ) -> Dict[str, Any]:
+    ) -> Any:
+        """
+        Generic request; returns raw data (dict for tickets, list for articles).
+        Logging adapted: handle both dict (tickets) and list (articles/other).
+        """
         url = f"{self.base_url}{endpoint}"
         logger.info(f"[{method}] {url} | params: {params}")
 
@@ -45,16 +50,25 @@ class ZammadClient:
             response = self.client.get(url, headers=self.headers, params=params)
             response.raise_for_status()
             data = response.json()
-            # Log structure
-            tickets_count = data.get("tickets_count", "N/A")
-            assets_len = (
-                len(data.get("assets", {}).get("Ticket", {}))
-                if data.get("assets")
-                else 0
-            )
-            logger.info(
-                f"[{method}] {url} | SUCCESS | tickets_count: {tickets_count} | assets.Ticket len: {assets_len}"
-            )
+
+            # Generic logging: Handle dict (tickets) or list (articles)
+            if isinstance(data, dict):
+                tickets_count = data.get("tickets_count", "N/A")
+                assets_len = (
+                    len(data.get("assets", {}).get("Ticket", {}))
+                    if data.get("assets")
+                    else 0
+                )
+                logger.info(
+                    f"[{method}] {url} | SUCCESS (dict) | tickets_count: {tickets_count} | assets.Ticket len: {assets_len}"
+                )
+            elif isinstance(data, list):
+                logger.info(
+                    f"[{method}] {url} | SUCCESS (list) | len(data): {len(data)}"
+                )
+            else:
+                logger.info(f"[{method}] {url} | SUCCESS | type: {type(data)}")
+
             self._rate_limit()
             return data
         except Exception as e:
@@ -76,6 +90,13 @@ class ZammadClient:
             "page": page,
         }
         data = self._make_request("GET", "/api/v1/tickets/search", params)
+
+        # Ensure dict for tickets
+        if not isinstance(data, dict):
+            logger.warning(
+                f"Unexpected type for tickets {date_str}: {type(data)} | FULL: {data}"
+            )
+            return {}
 
         # Validate with schema (optional)
         try:
@@ -174,11 +195,21 @@ class ZammadClient:
 
         return all_tickets
 
-    # get_articles_for_ticket unchanged
     def get_articles_for_ticket(self, ticket_id: int) -> List[Dict[str, Any]]:
+        """
+        Fetch articles (expects list); validate with RootModel.
+        """
         endpoint = f"/api/v1/ticket_articles/by_ticket/{ticket_id}"
         try:
             data = self._make_request("GET", endpoint)
+
+            # Ensure list for articles
+            if not isinstance(data, list):
+                logger.warning(
+                    f"Unexpected type for articles {ticket_id}: {type(data)} | FULL: {data[:500] if isinstance(data, (str, list)) else data}"
+                )  # Truncate
+                return []
+
             articles_resp = TicketArticlesResponse.model_validate(data)
             filtered_articles = [
                 {"from": art.from_field or "Unknown", "body": art.body}
@@ -191,7 +222,6 @@ class ZammadClient:
             logger.error(f"Ticket {ticket_id} | FAILED | {str(e)}")
             return []
 
-    # process_day unchanged
     def process_day(self, date_str: str) -> List[Dict[str, Any]]:
         tickets = self.fetch_all_tickets_for_date(date_str)
         logger.info(f"Articles for {len(tickets)} tickets on {date_str}")
