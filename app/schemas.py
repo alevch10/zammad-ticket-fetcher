@@ -12,51 +12,17 @@ import re
 # All fields optional as per request, to handle partial/incomplete API responses gracefully
 class TicketRecord(BaseModel):
     id: Optional[int] = None
-    group_id: Optional[int] = None
-    priority_id: Optional[int] = None
     state_id: Optional[int] = None  # Used as 'state' in CSV
-    organization_id: Optional[int] = None
-    number: Optional[str] = None
     title: Optional[str] = None  # Ignore specific title as per task
-    owner_id: Optional[int] = None
-    customer_id: Optional[int] = None
-    note: Optional[str] = None
-    first_response_at: Optional[str] = None
-    first_response_escalation_at: Optional[str] = None
-    first_response_in_min: Optional[int] = None
-    first_response_diff_in_min: Optional[int] = None
-    close_at: Optional[str] = None
-    close_escalation_at: Optional[str] = None
-    close_in_min: Optional[int] = None
-    close_diff_in_min: Optional[int] = None
-    update_escalation_at: Optional[str] = None
-    update_in_min: Optional[int] = None
-    update_diff_in_min: Optional[int] = None
-    last_close_at: Optional[str] = None
-    last_contact_at: Optional[str] = None
-    last_contact_agent_at: Optional[str] = None
-    last_contact_customer_at: Optional[str] = None
-    last_owner_update_at: Optional[str] = None
-    create_article_type_id: Optional[int] = None
-    create_article_sender_id: Optional[int] = None
     article_count: Optional[int] = None  # Used in CSV
-    escalation_at: Optional[str] = None
-    pending_time: Optional[int] = None
-    type: Optional[str] = None
-    time_unit: Optional[str] = None
-    preferences: Optional[Dict[str, Any]] = None
-    updated_by_id: Optional[int] = None
-    created_by_id: Optional[int] = None
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-    checklist_id: Optional[int] = None
-    referencing_checklist_ids: Optional[List[int]] = None
-    article_ids: Optional[List[int]] = None
-    ticket_time_accounting_ids: Optional[List[int]] = None
 
 
 class TicketSearchResponse(BaseModel):
-    root: List[TicketRecord]
+    tickets: Optional[List[int]] = None  # Page IDs
+    tickets_count: Optional[int] = None  # Total count
+    assets: Optional[Dict[str, Dict[str, TicketRecord]]] = (
+        None  # {'Ticket': {ID: TicketRecord, ...}}
+    )
 
 
 # Schema for Ticket Articles Response (list of articles)
