@@ -74,7 +74,6 @@ class ZammadClient:
             "expand": "false",
             "limit": self.limit,
             "page": page,
-            "with_total_count": "true",
         }
         data = self._make_request("GET", "/api/v1/tickets/search", params)
 
