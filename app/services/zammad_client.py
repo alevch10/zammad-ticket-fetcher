@@ -1,24 +1,17 @@
 import httpx
 from typing import List, Dict, Any
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_fixed,
-    retry_if_exception_type,
-)  # For 1 retry
-from ..schemas import TicketSearchResponse, TicketArticlesResponse
-from ..settings import settings
-from ..app_logger import logger
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
+from schemas import TicketSearchResponse, TicketArticlesResponse
+from settings import settings
+from app_logger import logger
 import gc
-import time  # For RPS limiter
+import time
 
 
 class ZammadClient:
     """
-    Client for Zammad API interactions.
-    Handles auth, rate limiting (3 RPS), 1 retry on failures, pagination, and article fetching.
-    Logs all requests/responses/errors for analysis.
-    Sync-only for simplicity and to avoid overload.
+    Client for Zammad API. Updated with extra logging for prod debug.
+    Handles empty tickets, errors in articles without full stop.
     """
 
     def __init__(self):
@@ -28,31 +21,27 @@ class ZammadClient:
             "Authorization": f"Bearer {self.token}",
             "Content-Type": "application/json",
         }
-        self.client = httpx.Client(timeout=30.0)  # 30s timeout; adjustable
-        self.rps_delay = 1.0 / 3.0  # ~0.333s for 3 RPS; sleep after each request
+        self.client = httpx.Client(
+            timeout=60.0, verify=False
+        )  # Increased timeout for large bodies; verify=False for prod SSL
+        self.rps_delay = 1.0 / 3.0  # 3 RPS
 
     def _rate_limit(self):
-        """Simple sleep for RPS control; called after each successful request."""
         time.sleep(self.rps_delay)
-        # Comment: For production, consider token bucket (e.g., ratelimit lib), but this is lightweight
 
     @retry(
-        stop=stop_after_attempt(2),  # 1 initial + 1 retry = 2 attempts
-        wait=wait_fixed(1),  # Wait 1s before retry
-        retry=retry_if_exception_type(
-            (httpx.HTTPStatusError, httpx.TimeoutException)
-        ),  # Retry only on HTTP/timeout errors
-        reraise=True,  # Re-raise last exception if all retries fail
+        stop=stop_after_attempt(2),
+        wait=wait_fixed(1),
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException)),
+        reraise=True,
     )
     def _make_request(
         self, method: str, endpoint: str, params: Dict[str, Any] = None
     ) -> Dict[str, Any]:
-        """
-        Generic GET request with logging, 1 retry, and rate limiting.
-        Logs full request/response; errors logged before raise for analysis.
-        """
         url = f"{self.base_url}{endpoint}"
-        logger.info(f"Making {method} request to {url} with params: {params}")
+        logger.info(
+            f"[{method}] {url} | params: {params}"
+        )  # Extra log for endpoint tracking
 
         try:
             if method.upper() == "GET":
@@ -63,24 +52,19 @@ class ZammadClient:
             response.raise_for_status()
             data = response.json()
             logger.info(
-                f"Successful response from {url}: total keys={len(data)}"
-            )  # Avoid logging full if huge; customize if needed
-            self._rate_limit()  # Enforce RPS after success
+                f"[{method}] {url} | SUCCESS | records/total: {len(data.get('records', [])) if 'records' in data else 'N/A'}/{data.get('total_count', 'N/A')}"
+            )  # Specific for tickets/articles
+            self._rate_limit()
             return data
         except Exception as e:
             logger.error(
-                f"Request failed after retries for {url}: {type(e).__name__}: {str(e)}"
+                f"[{method}] {url} | FAILED after retries | {type(e).__name__}: {str(e)} | response: {getattr(e, 'response', {}).text if hasattr(e, 'response') else 'N/A'}"
             )
-            # Comment: No raise here in except; tenacity handles re-raise
             raise
 
     def get_tickets_for_date(
         self, date_str: str, page: int = 1
     ) -> TicketSearchResponse:
-        """
-        Fetch one page of tickets for a date.
-        Parses with Pydantic for validation.
-        """
         query = f"created_at:{date_str}"
         params = {
             "query": query,
@@ -90,106 +74,132 @@ class ZammadClient:
             "with_total_count": "true",
         }
         data = self._make_request("GET", "/api/v1/tickets/search", params)
-        return TicketSearchResponse.model_validate(data)  # Pydantic parse
+        return TicketSearchResponse.model_validate(data)
 
     def fetch_all_tickets_for_date(self, date_str: str) -> List[Dict[str, Any]]:
-        """
-        Paginate to fetch ALL tickets for a date, combining records.
-        Filters: ignore title "Undelivered Mail Returned to Sender".
-        Logs progress and skips.
-        """
         all_tickets = []
         page = 1
         while True:
-            logger.info(f"Fetching page {page} for date {date_str}")
+            logger.info(
+                f"Fetching page {page} for {date_str} | total so far: {len(all_tickets)}"
+            )
             response = self.get_tickets_for_date(date_str, page)
 
             if not response.records:
+                logger.warning(f"No records on page {page} for {date_str} | breaking")
                 break
 
-            # Filter and enrich relevant fields
             filtered_tickets = []
+            skipped_count = 0
             for record in response.records:
-                if (
-                    record.title == "Undelivered Mail Returned to Sender"
-                ):  # Exact ignore as per update
+                # Updated filter: Skip ONLY specific phrase; empty title -> 'No Title' to not lose tickets
+                if record.title == "Undelivered Mail Returned to Sender":
                     logger.warning(
-                        f"Skipping ticket {record.id} due to ignored title: {record.title}"
+                        f"Skipping ticket {record.id} | ignored title: {record.title}"
                     )
+                    skipped_count += 1
                     continue
-                # Skip if no title or empty (as original, but now specific)
-                if not record.title or not record.title.strip():
-                    logger.warning(f"Skipping ticket {record.id} due to empty title")
-                    continue
+                title = (
+                    record.title.strip() if record.title else "No Title"
+                )  # Fallback, not skip
+                if not title:  # Extra safe
+                    title = "Empty Title"
+
                 filtered = {
                     "id": record.id,
-                    "state": record.state_id,  # Map state_id to state
-                    "title": record.title,
+                    "state": record.state_id,
+                    "title": title,
                     "article_count": record.article_count or 0,
                 }
                 filtered_tickets.append(filtered)
+                logger.debug(
+                    f"Added ticket {record.id} | title: {title[:50]}... | articles: {filtered['article_count']}"
+                )
 
             all_tickets.extend(filtered_tickets)
             total_count = response.total_count or 0
-            fetched = len(all_tickets)
             logger.info(
-                f"Fetched {fetched}/{total_count} tickets for {date_str} (page {page})"
+                f"Page {page} | added {len(filtered_tickets)} | skipped {skipped_count} | total: {len(all_tickets)}/{total_count}"
             )
 
-            if fetched >= total_count:
+            if len(all_tickets) >= total_count:
                 break
 
             page += 1
+
+        if not all_tickets:
+            logger.warning(
+                f"!!! NO TICKETS after all pages for {date_str} | check date/query/token !!!"
+            )
 
         return all_tickets
 
     def get_articles_for_ticket(self, ticket_id: int) -> List[Dict[str, Any]]:
         """
-        Fetch ALL articles for a ticket (no pagination in Zammad for /by_ticket).
-        Filters to {'from':, 'body':}; skips empty body.
+        Fetch articles with try-except: log error, return [] to continue processing other tickets.
         """
         endpoint = f"/api/v1/ticket_articles/by_ticket/{ticket_id}"
-        data = self._make_request("GET", endpoint)
-        articles_resp = TicketArticlesResponse.model_validate(data)  # Parse list
+        try:
+            data = self._make_request("GET", endpoint)
+            articles_resp = TicketArticlesResponse.model_validate(data)
 
-        filtered_articles = []
-        for article in articles_resp.root:
-            if article.body:  # Only if body present
-                filtered_articles.append(
-                    {
-                        "from": article.from_field or "Unknown",  # Fallback
-                        "body": article.body,
-                    }
-                )
+            filtered_articles = []
+            for article in articles_resp.root:
+                if article.body:
+                    filtered_articles.append(
+                        {
+                            "from": article.from_field or "Unknown",
+                            "body": article.body,  # Keep \n for full text
+                        }
+                    )
 
-        logger.info(f"Fetched {len(filtered_articles)} articles for ticket {ticket_id}")
-        return filtered_articles
+            logger.info(
+                f"Ticket {ticket_id} | SUCCESS | {len(filtered_articles)} articles fetched"
+            )
+            return filtered_articles
+        except Exception as e:
+            logger.error(
+                f"Ticket {ticket_id} | FAILED articles fetch | {str(e)} | continuing without articles"
+            )
+            return []  # Don't raise — continue with other tickets
 
     def process_day(self, date_str: str) -> List[Dict[str, Any]]:
-        """
-        Process one day: fetch tickets, articles for each, enrich with dynamic from/body.
-        No limit on articles — all added as from_1/body_1 etc.
-        Manual GC after day to prevent OOM on large ranges.
-        """
         tickets = self.fetch_all_tickets_for_date(date_str)
-        enriched_tickets = []
+        logger.info(f"Starting articles for {len(tickets)} tickets on {date_str}")
 
-        for ticket in tickets:
+        enriched_tickets = []
+        error_count = 0
+
+        for idx, ticket in enumerate(tickets, 1):
+            logger.info(
+                f"[{idx}/{len(tickets)}] Processing articles for ticket {ticket['id']} | expected: {ticket['article_count']}"
+            )
+
             articles = self.get_articles_for_ticket(ticket["id"])
-            # Enrich: copy base + dynamic keys for ALL articles (no limit)
+
             enriched = ticket.copy()
             for i, art in enumerate(articles, 1):
                 enriched[f"from_{i}"] = art["from"]
                 enriched[f"body_{i}"] = art["body"]
+
+            # If no articles but expected >0 — log
+            if ticket["article_count"] > 0 and not articles:
+                logger.warning(
+                    f"Ticket {ticket['id']} | expected {ticket['article_count']} but got 0 articles"
+                )
+
             enriched_tickets.append(enriched)
 
+            # GC every 10 tickets to prevent OOM in prod
+            if idx % 10 == 0:
+                gc.collect()
+                logger.debug(f"GC after {idx} tickets on {date_str}")
+
         logger.info(
-            f"Processed {len(enriched_tickets)} tickets for {date_str} with max articles={max(t.get('article_count', 0) for t in enriched_tickets) if enriched_tickets else 0}"
+            f"Finished {date_str} | {len(enriched_tickets)} enriched | {error_count} errors"
         )
-        gc.collect()  # Manual cleanup after day processing
+        gc.collect()  # Final GC
         return enriched_tickets
 
     def close(self):
-        """Close HTTP client on app shutdown to free connections."""
         self.client.close()
-        # Comment: Call in @app.on_event("shutdown")
