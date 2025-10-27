@@ -1,9 +1,9 @@
 import httpx
 from typing import List, Dict, Any
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
-from schemas import TicketSearchResponse, TicketArticlesResponse
-from settings import settings
-from app_logger import logger
+from ..schemas import TicketSearchResponse, TicketArticlesResponse
+from ..settings import settings
+from ..app_logger import logger
 import gc
 import time
 
