@@ -3,6 +3,7 @@ agent.log
 faiss_index
 data
 zammad_app.log
+.venv 
 
 ### macOS ###
 # General
